@@ -14,9 +14,10 @@
 
 // - Activate DEBUG - remote will not start up when its not connected to pc
 //    and monitor in Arduino IDE is open (Baudrate: 115200)
-//#define DEBUG                 //activate serial monitor
-//#define DEBUG_BATTERY         //activate battery debugging
-//#define DEBUG_TRANSMISSION    //activate transmission debugging
+//#define DEBUG                    //activate serial monitor
+//#define DEBUG_BATTERY            //activate battery debugging
+//#define DEBUG_TRANSMISSION       //activate transmission debugging
+//#define DEBUG_TRANSMISSION_STATS //activate transmission stats
 
 // - Choose frequency:
 #define RFM_EU        // RFM_EU for 415Mhz in Europe
@@ -438,6 +439,61 @@ bool eStopAnnounced = false;
 
 bool displayOFF = false;
 
+#ifdef DEBUG_TRANSMISSION_STATS
+
+static unsigned long lastControlPacket;
+
+// Maximum detected time between successful control packets
+static uint16_t maxControlGapMs;
+
+// Histogram of times between successful control packets
+#define HISTOGRAM_BUCKET_WIDTH_MS 10240
+#define HISTOGRAM_BUCKET_COUNT 2000
+static uint32_t controlGapHistogram[HISTOGRAM_BUCKET_COUNT];
+
+void controlPacketSuccess() {
+  if (!lastControlPacket) {
+    // The first packet received.
+    lastControlPacket = millis();
+    return;
+  }
+
+  unsigned long now = millis();
+  unsigned long gap = now - lastControlPacket;
+  lastControlPacket = now;
+
+  if (maxControlGapMs < gap) {
+    maxControlGapMs = gap;
+  }
+
+  int bucket = gap / HISTOGRAM_BUCKET_WIDTH_MS;
+  if (bucket >= 0 && bucket < HISTOGRAM_BUCKET_COUNT) {
+    controlGapHistogram[bucket]++;
+  }
+}
+
+void controlPacketFailed() {
+  if (!lastControlPacket) {
+    return;  // never connected
+  }
+
+  unsigned long now = millis();
+  unsigned long gap = now - lastControlPacket;
+
+  if (gap < 100) {
+    // Ignore short gaps. (Note: this value may need adjustment depending on the
+    // selected timeout and retry options.
+    return;
+  }
+
+  // Alert the user when a control gap is detected.
+  activateAnnouncement = false;  // replace any existing announcement
+  setAnnouncement("Control loss detected",
+                  String("Gap: ") + gap + " ms", 1000, false);
+}
+
+#endif // DEBUG_TRANSMISSION_STATS
+
 // SETUP
 // --------------------------------------------------------------------------------------
 // --------------------------------------------------------------------------------------
@@ -838,6 +894,10 @@ bool transmitToReceiver(uint8_t retries, uint16_t timeout) {
         Serial.println("....");
       #endif
 
+      #ifdef DEBUG_TRANSMISSION_STATS
+      controlPacketSuccess();
+      #endif
+
       return true;
     } else {
       updateLastTransmissionTimer();
@@ -848,9 +908,16 @@ bool transmitToReceiver(uint8_t retries, uint16_t timeout) {
         Serial.println("Failed receiving returnData from receiver by timeout");
       #endif
 
+      #ifdef DEBUG_TRANSMISSION_STATS
+      controlPacketFailed();
+      #endif
+
       return true;
     }
   } else {
+    #ifdef DEBUG_TRANSMISSION_STATS
+    controlPacketFailed();
+    #endif
     return false;
   }
 }
@@ -1447,6 +1514,9 @@ u8g2.clearBuffer();
           } else {
             drawDetailPage();
           }
+        #endif
+        #ifdef DEBUG_TRANSMISSION_STATS
+           drawTransmissionStats();
         #endif
       }
       u8g2.setFontMode(0);
@@ -2197,6 +2267,31 @@ void drawDetailPage() {
 }
 #endif
 
+#ifdef DEBUG_TRANSMISSION_STATS
+void drawTransmissionStats() {
+  int x = 0;
+  int y = 12;
+  u8g2.setCursor(x, y);
+  u8g2.print("max gap: ");
+  u8g2.print(u8x8_u16toa(maxControlGapMs, 4));
+
+  // Draw cumulative distribution of gaps. First count total:
+  uint32_t total = 0;
+  for (int i = 0; i < HISTOGRAM_BUCKET_COUNT; ++i) {
+    total += controlGapHistogram[i];
+  }
+  if (!total) total = 1;
+
+  // Then draw graph:
+  int y_range = 64-12;
+  uint32_t sum = 0;
+  for (int i = 0; i < HISTOGRAM_BUCKET_COUNT; ++i) {
+    sum += controlGapHistogram[i];
+    int height = y_range * sum / total;
+    u8g2.drawVLine(i + 4, 12, height);
+  }
+}
+#endif
 
 // Prepare a string to be displayed on the OLED
 //---------------------------------------------------------------------------------------
